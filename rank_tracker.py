@@ -91,18 +91,22 @@ def host_of(url):
 
 
 # ----------------------------- نداءات ScrapingBee -----------------------------
-def sb_google(api_key, keyword, country, language, page):
-    """يرجّع قائمة النتائج العضوية (organic_results) لصفحة محددة."""
+def sb_google(api_key, keyword, country, language, nb_results=30):
+    """يرجّع قائمة النتائج العضوية مرتّبة (top N) في طلب واحد.
+
+    نطلب nb_results مباشرة بدل ترقيم الصفحات يدوياً — هذا يلغي أي لبس في
+    حساب رقم الصفحة، ويعطي ترتيباً مطلقاً موثوقاً (1، 2، 3 ...).
+    """
     params = {
         "api_key": api_key,
         "search": keyword,
         "country_code": country,
         "language": language,
-        "page": page,
+        "nb_results": str(nb_results),
     }
     for attempt in range(3):
         try:
-            r = requests.get(SB_GOOGLE, params=params, timeout=120)
+            r = requests.get(SB_GOOGLE, params=params, timeout=180)
             if r.status_code == 200:
                 data = r.json()
                 body = data.get("body", data)
@@ -123,39 +127,6 @@ def google_search_url(keyword, country, language, page):
     )
 
 
-def sb_screenshot(api_key, keyword, country, language, page, out_path):
-    """يلتقط سكرين شوت لصفحة نتائج جوجل المطلوبة ويحفظها PNG.
-
-    ScrapingBee يتطلب custom_google=true لاستهداف جوجل (يكلّف ~20 كريدت/صورة).
-    يطبع رسالة الخطأ الكاملة عند الفشل لتسهيل التشخيص.
-    """
-    search_url = google_search_url(keyword, country, language, page)
-    params = {
-        "api_key": api_key,
-        "url": search_url,
-        "custom_google": "true",      # مطلوب لاستهداف جوجل
-        "render_js": "true",
-        "screenshot_full_page": "true",
-        "country_code": country,
-        "window_width": "1366",
-        "wait": "3500",
-    }
-    for attempt in range(3):
-        try:
-            r = requests.get(SB_BASE, params=params, timeout=200)
-            ct = r.headers.get("content-type", "")
-            is_png = r.content[:8] == b"\x89PNG\r\n\x1a\n"
-            if r.status_code == 200 and ("image" in ct or is_png):
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-                out_path.write_bytes(r.content)
-                return True
-            print(f"  ⚠️ سكرين شوت (محاولة {attempt+1}) كود {r.status_code} نوع {ct} | {r.text[:300]}")
-        except Exception as e:
-            print(f"  ⚠️ خطأ سكرين شوت (محاولة {attempt+1}): {e}")
-        time.sleep(3 * (attempt + 1))
-    return False
-
-
 # ----------------------------- كتابة Google Sheet -----------------------------
 def write_sheet(sa_json, sheet_id, date_str, rows, now):
     creds = Credentials.from_service_account_info(
@@ -169,12 +140,12 @@ def write_sheet(sa_json, sheet_id, date_str, rows, now):
     if title in [w.title for w in sh.worksheets()]:
         title = f"{date_str} ({now.strftime('%H%M')})"
 
-    ws = sh.add_worksheet(title=title, rows=len(rows) + 6, cols=11)
+    ws = sh.add_worksheet(title=title, rows=len(rows) + 6, cols=12)
 
     headers = [
         "#", "الكلمة المفتاحية", "الحالة", "الصفحة", "الترتيب في الصفحة",
         "الترتيب الكلي", "الرابط الظاهر", "المركز الأول (منافس)",
-        "رابط البحث (تحقّق يدوي)", "وقت الفحص",
+        "رابط البحث (تحقّق يدوي)", "أعلى 10 نتائج (تدقيق)", "وقت الفحص",
     ]
     values = [[f"تقرير ترتيب الموقع في جوجل — {date_str}"]]
     values.append(headers)
@@ -217,6 +188,14 @@ def write_sheet(sa_json, sheet_id, date_str, rows, now):
         {"updateDimensionProperties": {
             "range": {"sheetId": sid, "dimension": "COLUMNS", "startIndex": 8, "endIndex": 9},
             "properties": {"pixelSize": 170}, "fields": "pixelSize"}},
+        # عرض عمود التدقيق (أعلى 10 نتائج)
+        {"updateDimensionProperties": {
+            "range": {"sheetId": sid, "dimension": "COLUMNS", "startIndex": 9, "endIndex": 10},
+            "properties": {"pixelSize": 260}, "fields": "pixelSize"}},
+        # ارتفاع صفوف البيانات (لإظهار قائمة التدقيق ذات 10 أسطر)
+        {"updateDimensionProperties": {
+            "range": {"sheetId": sid, "dimension": "ROWS", "startIndex": 2, "endIndex": 2 + len(rows)},
+            "properties": {"pixelSize": 190}, "fields": "pixelSize"}},
     ]}
     sh.batch_update(body)
     print(f"✅ تم إنشاء التبويب: {title}")
@@ -244,48 +223,55 @@ def main():
     Path("last_run.txt").write_text(
         now.strftime("%Y-%m-%d %H:%M (Asia/Riyadh)"), encoding="utf-8")
 
-    print(f"🎯 الدومين المستهدف: {target} | الدولة: {country} | اللغة: {language} | الصفحات: {max_pages}")
+    nb = max_pages * 10  # نطلب هذا العدد من النتائج في طلب واحد (top N)
+    print(f"🎯 الدومين المستهدف: {target} | الدولة: {country} | اللغة: {language} | أعلى {nb} نتيجة")
     rows = []
     for i, kw in enumerate(keywords, start=1):
+        results = sb_google(api_key, kw, country, language, nb_results=nb)
+
+        # بناء قائمة مرتّبة نظيفة (روابط النتائج العضوية بالترتيب)
+        ordered = []
+        for res in results:
+            u = res.get("url") or res.get("link") or ""
+            if u:
+                ordered.append(u)
+
+        top_competitor = host_of(ordered[0]) if ordered else ""
+
+        # إيجاد أول ظهور لقيود في القائمة المرتّبة
         found = None
-        top_competitor = ""
-        seen = 0
-        for page in range(1, max_pages + 1):
-            results = sb_google(api_key, kw, country, language, page)
-            if page == 1 and results:
-                top_competitor = host_of(results[0].get("url") or results[0].get("link") or "")
-            for idx, res in enumerate(results):
-                u = res.get("url") or res.get("link") or ""
-                if target and target in host_of(u):
-                    found = {
-                        "page": page,
-                        "rank_in_page": idx + 1,
-                        "abs_pos": seen + idx + 1,
-                        "url": u,
-                    }
-                    break
-            if found:
+        for idx, u in enumerate(ordered):
+            if target and target in host_of(u):
+                abs_pos = idx + 1
+                found = {
+                    "abs_pos": abs_pos,
+                    "page": (abs_pos - 1) // 10 + 1,       # 10 نتائج عضوية لكل صفحة
+                    "rank_in_page": (abs_pos - 1) % 10 + 1,
+                    "url": u,
+                }
                 break
-            seen += len(results)
-            time.sleep(1)
 
         if found:
             status = "✅ ظهر"
             page_v, rank_v, abs_v, url_v = found["page"], found["rank_in_page"], found["abs_pos"], found["url"]
-            shot_page = found["page"]
+            verify_page = found["page"]
         else:
-            status = f"❌ ما ظهر ضمن أول {max_pages} صفحات"
+            status = f"❌ ما ظهر ضمن أول {nb} نتيجة"
             page_v = rank_v = abs_v = url_v = "—"
-            shot_page = 1
+            verify_page = 1
 
-        # رابط بحث جوجل لنفس الصفحة — للتحقق اليدوي في نافذة خاصة (Incognito)
-        verify_url = google_search_url(kw, country, language, shot_page)
+        # رابط بحث جوجل للتحقق اليدوي في نافذة خاصة (Incognito)
+        verify_url = google_search_url(kw, country, language, verify_page)
         verify_cell = f'=HYPERLINK("{verify_url}","🔎 افتح بحث جوجل")'
 
+        # عمود التدقيق: أعلى 10 نتائج كما رأتها الأداة (رقم. الدومين)
+        audit = "\n".join(f"{n}. {host_of(u)}" for n, u in enumerate(ordered[:10], 1)) or "—"
+
         rows.append([i, kw, status, page_v, rank_v, abs_v, url_v,
-                     top_competitor or "—", verify_cell, now.strftime("%H:%M")])
+                     top_competitor or "—", verify_cell, audit, now.strftime("%H:%M")])
         print(f"[{i}/{len(keywords)}] {kw} → {status}"
               + (f" (صفحة {page_v}، ترتيب كلي {abs_v})" if found else ""))
+        time.sleep(1)
 
     write_sheet(sa_json, sheet_id, date_str, rows, now)
     print("🎉 تم بنجاح.")
