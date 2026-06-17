@@ -11,6 +11,9 @@ country_code: "sa"
 # لغة البحث — العربية
 language: "ar"
 
+# اسم الموقع لمحرّك DataForSEO (يُحدّد أن البحث من داخل السعودية)
+location_name: "Saudi Arabia"
+
 # كم صفحة نفحص بحثاً عن قيود (كل صفحة = 10 نتائج). 5 = أول 50 نتيجة
 max_pages: 5
 
