@@ -2,11 +2,13 @@
 # -*- coding: utf-8 -*-
 """
 متتبّع ترتيب الموقع في جوجل (Daily SERP Rank Tracker)
-- يبحث عن كلمات مفتاحية محددة في جوجل
+- يبحث عن كلمات مفتاحية محددة في جوجل من داخل السعودية
 - يحدد ترتيب الدومين المستهدف (الصفحة + الترتيب داخل الصفحة + الترتيب الكلي)
-- يلتقط سكرين شوت للصفحة التي ظهر فيها الموقع
 - يكتب النتائج في Google Sheet داخل تبويب (sheet) جديد باسم تاريخ اليوم
-يعمل عبر ScrapingBee (Google Search API + Screenshot API) ومجدول عبر GitHub Actions.
+- يضيف عمود تدقيق (أعلى 10 نتائج) + رابط بحث جوجل للتحقق اليدوي
+
+محرّك البحث: DataForSEO (Google Organic Live Advanced) — دقيق للعربي والسعودية.
+مجدول عبر GitHub Actions.
 """
 
 import os
@@ -14,6 +16,7 @@ import re
 import sys
 import json
 import time
+import base64
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse, quote_plus
@@ -25,8 +28,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 RIYADH = ZoneInfo("Asia/Riyadh")
-SB_BASE = "https://app.scrapingbee.com/api/v1"
-SB_GOOGLE = "https://app.scrapingbee.com/api/v1/store/google"
+DFS_ENDPOINT = "https://api.dataforseo.com/v3/serp/google/organic/live/advanced"
 
 
 # ----------------------------- إعدادات وبيئة -----------------------------
@@ -60,6 +62,7 @@ def load_config():
 
     cfg.setdefault("country_code", "sa")
     cfg.setdefault("language", "ar")
+    cfg.setdefault("location_name", "Saudi Arabia")
     cfg.setdefault("max_pages", 5)
 
     if not cfg.get("target_domain") or not cfg.get("keywords"):
@@ -90,28 +93,51 @@ def host_of(url):
         return ""
 
 
-# ----------------------------- نداءات ScrapingBee -----------------------------
-def sb_google(api_key, keyword, country, language, nb_results=30):
-    """يرجّع قائمة النتائج العضوية مرتّبة (top N) في طلب واحد.
+# ----------------------------- نداء DataForSEO -----------------------------
+def dfs_google(login, password, keyword, location_name, language, depth=50):
+    """يرجّع قائمة النتائج العضوية مرتّبة (top N) من DataForSEO في طلب واحد.
 
-    نطلب nb_results مباشرة بدل ترقيم الصفحات يدوياً — هذا يلغي أي لبس في
-    حساب رقم الصفحة، ويعطي ترتيباً مطلقاً موثوقاً (1، 2، 3 ...).
+    نستخدم Google Organic Live Advanced مع location_name + language_code،
+    ونطلب depth نتيجة. نُرجّع فقط عناصر type == "organic" بترتيبها الفعلي،
+    فنحصل على ترتيب مطلق موثوق (1، 2، 3 ...) مطابق لبحث محايد في السعودية.
     """
-    params = {
-        "api_key": api_key,
-        "search": keyword,
-        "country_code": country,
-        "language": language,
-        "nb_results": str(nb_results),
+    cred = base64.b64encode(f"{login}:{password}".encode()).decode()
+    headers = {
+        "Authorization": f"Basic {cred}",
+        "Content-Type": "application/json",
     }
+    # الجسم عبارة عن قائمة مهام (مهمة واحدة هنا)
+    payload = [{
+        "keyword": keyword,
+        "location_name": location_name,
+        "language_code": language,
+        "depth": depth,
+        "device": "desktop",
+        "os": "windows",
+    }]
+
     for attempt in range(3):
         try:
-            r = requests.get(SB_GOOGLE, params=params, timeout=180)
+            r = requests.post(DFS_ENDPOINT, headers=headers, json=payload, timeout=180)
             if r.status_code == 200:
                 data = r.json()
-                body = data.get("body", data)
-                return body.get("organic_results", []) or []
-            print(f"  ⚠️ بحث (محاولة {attempt+1}) كود {r.status_code}: {r.text[:200]}")
+                if data.get("status_code") != 20000:
+                    print(f"  ⚠️ DataForSEO حالة عامة {data.get('status_code')}: {data.get('status_message')}")
+                tasks = data.get("tasks") or []
+                if not tasks:
+                    return []
+                task = tasks[0]
+                if task.get("status_code") != 20000:
+                    print(f"  ⚠️ مهمة DataForSEO كود {task.get('status_code')}: {task.get('status_message')}")
+                    # رصيد غير كافٍ / مفاتيح غلط تظهر هنا
+                result = task.get("result") or []
+                if not result:
+                    return []
+                items = result[0].get("items") or []
+                # نُبقي فقط النتائج العضوية بترتيبها
+                organic = [it for it in items if it.get("type") == "organic"]
+                return organic
+            print(f"  ⚠️ بحث (محاولة {attempt+1}) كود HTTP {r.status_code}: {r.text[:200]}")
         except Exception as e:
             print(f"  ⚠️ خطأ بحث (محاولة {attempt+1}): {e}")
         time.sleep(3 * (attempt + 1))
@@ -203,7 +229,8 @@ def write_sheet(sa_json, sheet_id, date_str, rows, now):
 
 # ----------------------------- المنطق الرئيسي -----------------------------
 def main():
-    api_key = env("SCRAPINGBEE_API_KEY", required=True)
+    login = env("DATAFORSEO_LOGIN", required=True)
+    password = env("DATAFORSEO_PASSWORD", required=True)
     sa_json = env("GOOGLE_SERVICE_ACCOUNT_JSON", required=True)
     cfg = load_config()
     sheet_id = env("SHEET_ID") or cfg.get("sheet_id")
@@ -214,6 +241,7 @@ def main():
     keywords = cfg["keywords"]
     country = cfg["country_code"]
     language = cfg["language"]
+    location_name = cfg["location_name"]
     max_pages = int(cfg["max_pages"])
 
     now = datetime.now(RIYADH)
@@ -223,16 +251,16 @@ def main():
     Path("last_run.txt").write_text(
         now.strftime("%Y-%m-%d %H:%M (Asia/Riyadh)"), encoding="utf-8")
 
-    nb = max_pages * 10  # نطلب هذا العدد من النتائج في طلب واحد (top N)
-    print(f"🎯 الدومين المستهدف: {target} | الدولة: {country} | اللغة: {language} | أعلى {nb} نتيجة")
+    nb = max_pages * 10  # عدد النتائج المطلوبة في طلب واحد (depth)
+    print(f"🎯 الدومين المستهدف: {target} | الموقع: {location_name} | اللغة: {language} | أعلى {nb} نتيجة")
     rows = []
     for i, kw in enumerate(keywords, start=1):
-        results = sb_google(api_key, kw, country, language, nb_results=nb)
+        organic = dfs_google(login, password, kw, location_name, language, depth=nb)
 
         # بناء قائمة مرتّبة نظيفة (روابط النتائج العضوية بالترتيب)
         ordered = []
-        for res in results:
-            u = res.get("url") or res.get("link") or ""
+        for res in organic:
+            u = res.get("url") or ""
             if u:
                 ordered.append(u)
 
