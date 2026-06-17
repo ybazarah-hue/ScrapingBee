@@ -9,7 +9,7 @@ on:
   workflow_dispatch: {}   # يسمح بالتشغيل اليدوي للتجربة
 
 permissions:
-  contents: write          # لازم لحفظ السكرين شوتات داخل الريبو
+  contents: write          # لازم لحفظ ملف النبضة داخل الريبو
 
 concurrency:
   group: rank-tracker
@@ -32,7 +32,8 @@ jobs:
 
       - name: Run rank tracker
         env:
-          SCRAPINGBEE_API_KEY: ${{ secrets.SCRAPINGBEE_API_KEY }}
+          DATAFORSEO_LOGIN: ${{ secrets.DATAFORSEO_LOGIN }}
+          DATAFORSEO_PASSWORD: ${{ secrets.DATAFORSEO_PASSWORD }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           SHEET_ID: ${{ secrets.SHEET_ID }}
           KEYWORDS_JSON: ${{ secrets.KEYWORDS_JSON }}   # اختياري
