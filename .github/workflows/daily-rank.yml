@@ -1,0 +1,46 @@
+name: Daily SERP Rank Tracker
+
+on:
+  schedule:
+    # 03:00 UTC = 06:00 صباحاً بتوقيت الرياض
+    - cron: '0 3 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rank-tracker
+  cancel-in-progress: false
+
+jobs:
+  track:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run rank tracker
+        env:
+          SCRAPINGBEE_API_KEY: ${{ secrets.SCRAPINGBEE_API_KEY }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+          KEYWORDS_JSON: ${{ secrets.KEYWORDS_JSON }}
+          TARGET_DOMAIN: ${{ secrets.TARGET_DOMAIN }}
+        run: python rank_tracker.py
+
+      - name: Commit screenshots
+        run: |
+          git config user.name "rank-tracker-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add screenshots || true
+          git commit -m "screenshots $(date -u +%F)" || echo "nothing to commit"
+          git push || echo "push failed"
