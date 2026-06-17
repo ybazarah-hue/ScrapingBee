@@ -2,12 +2,14 @@ name: Daily SERP Rank Tracker
 
 on:
   schedule:
-    # 03:00 UTC = 06:00 صباحاً بتوقيت الرياض
+    # 03:00 UTC = 06:00 صباحاً بتوقيت الرياض (الرياض = UTC+3)
+    # الصيغة: دقيقة ساعة يوم شهر يوم-الأسبوع
+    # مثال: 7 صباحاً الرياض = '0 4 * * *'  |  8 صباحاً = '0 5 * * *'
     - cron: '0 3 * * *'
-  workflow_dispatch: {}
+  workflow_dispatch: {}   # يسمح بالتشغيل اليدوي للتجربة
 
 permissions:
-  contents: write
+  contents: write          # لازم لحفظ السكرين شوتات داخل الريبو
 
 concurrency:
   group: rank-tracker
@@ -33,14 +35,14 @@ jobs:
           SCRAPINGBEE_API_KEY: ${{ secrets.SCRAPINGBEE_API_KEY }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           SHEET_ID: ${{ secrets.SHEET_ID }}
-          KEYWORDS_JSON: ${{ secrets.KEYWORDS_JSON }}
-          TARGET_DOMAIN: ${{ secrets.TARGET_DOMAIN }}
+          KEYWORDS_JSON: ${{ secrets.KEYWORDS_JSON }}   # اختياري
+          TARGET_DOMAIN: ${{ secrets.TARGET_DOMAIN }}   # اختياري
         run: python rank_tracker.py
 
-      - name: Commit screenshots
+      - name: Commit heartbeat
         run: |
           git config user.name "rank-tracker-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add screenshots || true
-          git commit -m "screenshots $(date -u +%F)" || echo "nothing to commit"
-          git push || echo "push failed"
+          git add last_run.txt || true
+          git commit -m "run $(date -u +%F)" || echo "لا جديد للحفظ"
+          git push || echo "تعذّر الدفع"
