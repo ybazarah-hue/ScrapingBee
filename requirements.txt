@@ -1,0 +1,4 @@
+requests>=2.31
+PyYAML>=6.0
+gspread>=6.1
+google-auth>=2.30
